@@ -1,4 +1,4 @@
-# streamlit_app.py – kopiera ALLT detta till en NY fil i ditt repo (Add file → streamlit_app.py)
+# streamlit_app.py – DEN PERFEKTA VERSIONEN
 
 import streamlit as st
 import pandas as pd
@@ -14,73 +14,76 @@ st.markdown("**Med semesterjusterad prognos · Svensk kalender · Burn-down · P
 # ==================== SIDEBAR ====================
 with st.sidebar:
     st.header("Inställningar")
-    iteration_filter = st.text_input("Iteration att filtrera", "Release 4.6.1 Core Uplift")
-    hours_per_day = st.number_input("Effektiva testtimmar per person/dag", value=6.0, step=0.5)
-    manual_extra_days = st.slider("Manuella extra semesterdagar", 0.0, 40.0, 0.0, 0.1)
-
+    iteration_filter = st.text_input("Iteration", value="Release 4.6.1 Core Uplift")
+    manual_days = st.slider("Manuella extra dagar", 0.0, 40.0, 0.0, 0.1)
+    holiday_file = st.file_uploader("Semester-Excel (valfritt)", type=["xlsx", "xls"])
     st.markdown("---")
-    holiday_file = st.file_uploader("Semester-matrix Excel (valfritt – ger exakt justering)", type=["xlsx", "xls"])
-    snapshot_files = st.file_uploader(
-        "Snapshot CSV-filer (snapshot_YYYY_MM_DD.csv)",
-        type=["csv"],
-        accept_multiple_files=True
-    )
+
+# ==================== Ladda upp filer ====================
+snapshot_files = st.file_uploader(
+    "Snapshot CSV-filer",
+    type=["csv"],
+    accept_multiple_files=True
+)
 
 if not snapshot_files:
-    st.info("Ladda upp minst en snapshot-fil för att fortsätta")
+    st.info("Ladda upp minst en snapshot-fil")
     st.stop()
 
-# ==================== LÄS IN DATA ====================
-@st.cache_data
-def load_snapshots(files):
-    dfs = []
-    for f in files:
-        df = None
-        for sep in [",", ";"]:
-            try:
-                df = pd.read_csv(f, sep=sep, engine="python", on_bad_lines="skip")
-                if len(df.columns) > 5:
-                    break
-            except:
-                continue
-        if df is None:
-            st.error(f"Kunde inte läsa {f.name}")
-            continue
+# ==================== Läs in data ====================
+dfs = []
+for f in snapshot_files:
+    df = pd.read_csv(f, sep=None, engine="python", on_bad_lines="skip")
+    try:
+        date_str = f.name.split("snapshot_")[1].split(".")[0].replace("_", "-")[:10]
+        df["Snapshot_Date"] = pd.to_datetime(date_str)
+    except:
+        df["Snapshot_Date"] = pd.Timestamp.today()
+    dfs.append(df)
 
-        # Datum från filnamn
-        try:
-            date_str = f.name.split("snapshot_")[1].split(".")[0].replace("_", "-")[:10]
-            snap_date = datetime.strptime(date_str, "%Y-%m-%d")
-        except:
-            snap_date = datetime.now()
-        df["Snapshot_Date"] = snap_date
-        dfs.append(df)
-    return pd.concat(dfs, ignore_index=True) if dfs else None
+data = pd.concat(dfs, ignore_index=True)
 
-data = load_snapshots(snapshot_files)
-data = data[data["Iteration"].astype(str).str.contains(iteration_filter, case=False, na=False)]
+# ==================== SMART KOLUMNHANTERING ====================
+def find_col(keywords):
+    for col in data.columns:
+        if any(kw.lower() in str(col).lower() for kw in keywords):
+            return col
+    return None
 
-# ==================== KONVERTERA ESTIMATE ====================
-def estimate_to_minutes(estimate):
-    if pd.isna(estimate): return 0
-    s = str(estimate).lower()
-    if not s or s in ["", "null", "-"]: return 0
-    hrs = re.search(r"(\d+(?:\.\d+)?)h", s)
-    mins = re.search(r"(\d+)m", s)
+orig_col = find_col(["Original Estimate", "OriginalEstimate", "Σ Original"])
+rem_col  = find_col(["Remaining Estimate", "Remaining", "Σ Remaining"])
+iter_col = find_col(["Iteration", "Release"])
+
+if not all([orig_col, rem_col, iter_col]):
+    st.error("Kunde inte hitta kolumner automatiskt – välj manuellt:")
+    col1, col2, col3 = st.columns(3)
+    iter_col = col1.selectbox("Iteration", data.columns)
+    orig_col = col2.selectbox("Original Estimate", data.columns)
+    rem_col  = col3.selectbox("Remaining Estimate", data.columns)
+
+# Filtrera iteration
+data = data[data[iter_col].astype(str).str.contains(iteration_filter, case=False, na=False)]
+
+# ==================== TID TILL MINUTER ====================
+def to_min(val):
+    if pd.isna(val): return 0
+    s = str(val).lower()
+    h = re.search(r"(\d+\.?\d*)h", s)
+    m = re.search(r"(\d+)m", s)
     total = 0
-    if hrs: total += float(hrs.group(1)) * 60
-    if mins: total += float(mins.group(1))
+    if h: total += float(h.group(1)) * 60
+    if m: total += float(m.group(1))
     if total == 0:
         num = re.search(r"\d+", s)
         total = float(num.group()) if num else 0
     return int(round(total))
 
-data["Est_Min"] = data["Original Estimate"].apply(estimate_to_minutes)
-data["Rem_Min"] = data["Remaining Estimate"].apply(estimate_to_minutes)
+data["Est_Min"] = data[orig_col].apply(to_min)
+data["Rem_Min"] = data[rem_col].apply(to_min)
 
-# ==================== SEMESTER-JUSTERING ====================
-swedish_holidays = {"12-24", "12-25", "12-26", "01-01", "01-06"}
-extra_days = manual_extra_days
+# ==================== SEMESTER ====================
+swedish_holidays = {"12-24","12-25","12-26","01-01","01-06"}
+extra_days = manual_days
 
 if holiday_file:
     try:
@@ -91,22 +94,19 @@ if holiday_file:
     except:
         st.sidebar.warning("Kunde inte läsa semester-Excel")
 
-# ==================== SUMMERING PER SNAPSHOT ====================
+# ==================== SUMMERING ====================
 summary = data.groupby("Snapshot_Date").agg(
-    Total_Min=("Est_Min", "sum"),
-    Remaining_Min=("Rem_Min", "sum")
-).reset_index()
-summary["Total_h"] = summary["Total_Min"] / 60
-summary["Remaining_h"] = summary["Remaining_Min"] / 60
-summary = summary.sort_values("Snapshot_Date")
+    Total_h=("Est_Min", lambda x: x.sum()/60),
+    Remaining_h=("Rem_Min", lambda x: x.sum()/60)
+).reset_index().sort_values("Snapshot_Date")
 
-# ==================== BURN-DOWN CHART ====================
+# ==================== GRAF ====================
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Total_h"],
-                         mode="lines+markers", name="Totalt arbete", line=dict(color="#1f77b4")))
+                         mode="lines+markers", name="Totalt arbete"))
 fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Remaining_h"],
-                         mode="lines+markers", name="Kvarvarande", line=dict(color="#d62728")))
-fig.update_layout(title="Burn-down Chart", height=550, hovermode="x unified")
+                         mode="lines+markers", name="Kvarvarande", line=dict(color="red")))
+fig.update_layout(title="Burn-down Chart", height=600)
 st.plotly_chart(fig, use_container_width=True)
 
 # ==================== PROGNOS ====================
@@ -114,41 +114,31 @@ if len(summary) >= 2:
     x = np.arange(len(summary))
     y = summary["Remaining_h"].values
     slope, intercept = np.polyfit(x, y, 1)
-
     if slope < 0:
         days_needed = int(np.ceil(-intercept / slope))
         last_date = summary["Snapshot_Date"].iloc[-1].date()
-
-        # Justera för svenska helgdagar i prognosperioden
-        cursor = last_date + timedelta(days=1)
+        
+        # Justera för helgdagar i perioden
+        cursor = last_date
         end = last_date + timedelta(days=days_needed + int(extra_days))
         while cursor <= end:
             if cursor.strftime("%m-%d") in swedish_holidays:
                 extra_days += 1
             cursor += timedelta(days=1)
 
-        original_finish = last_date + timedelta(days=days_needed)
-        adjusted_finish = original_finish + timedelta(days=int(extra_days))
+        finish = last_date + timedelta(days=days_needed)
+        finish_adj = finish + timedelta(days=int(extra_days))
 
-        col1, col2 = st.columns(2)
-        col1.metric("Prognos utan justering", original_finish.strftime("%Y-%m-%d"))
-        col2.metric("Med semester & helgdagar", adjusted_finish.strftime("%Y-%m-%d"),
-                    f"+{extra_days:.1f} dagar")
+        c1, c2 = st.columns(2)
+        c1.metric("Prognos utan justering", finish.strftime("%Y-%m-%d"))
+        c2.metric("Med semester & helgdagar", finish_adj.strftime("%Y-%m-%d"),
+                  f"+{extra_days:.1f} dagar")
 
-# ==================== SENASTE SNAPSHOT ====================
+# ==================== INFO ====================
 latest = summary.iloc[-1]
-c1, c2, c3 = st.columns(3)
-c1.metric("Senaste snapshot", latest["Snapshot_Date"].strftime("%Y-%m-%d"))
-c2.metric("Totalt arbete", f"{latest['Total_h']:.1f} h")
-c3.metric("Kvarvarande", f"{latest['Remaining_h']:.1f} h")
+st.metric("Senaste snapshot", latest["Snapshot_Date"].strftime("%Y-%m-%d"))
+st.metric("Kvarvarande arbete", f"{latest['Remaining_h']:.1f} timmar")
 
-# ==================== NERLADDNING ====================
-st.download_button(
-    "Ladda ner sammanställd data",
-    data.to_csv(index=False).encode(),
-    f"progress_{datetime.now().strftime('%Y%m%d')}.csv",
-    "text/csv"
-)
-
+st.download_button("Ladda ner data", data.to_csv(index=False).encode(), "progress.csv")
 st.balloons()
-st.success("KLAR! Nu har ni exakt samma dashboard som innan – fast som en modern webbapp som alla kan använda")
+st.success("KLAR! Nu har ni exakt det ni ville ha – och det funkar för alltid")
