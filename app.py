@@ -5,20 +5,14 @@ from datetime import datetime, timedelta
 import re
 
 st.set_page_config(page_title="Progress Tracker", layout="wide")
-st.title("Progress Tracker – väljer kolumner själv")
+st.title("Progress Tracker – funkar alltid")
 
-# -------------------- UPLOAD --------------------
-snapshot_files = st.file_uploader(
-    "Ladda upp snapshot_CSV-filer (en eller flera)",
-    type=["csv"],
-    accept_multiple_files=True
-)
-
+snapshot_files = st.file_uploader("Ladda upp snapshot-filer", type=["csv"], accept_multiple_files=True)
 if not snapshot_files:
-    st.info("Ladda upp minst en fil för att fortsätta")
+    st.info("Ladda upp minst en fil")
     st.stop()
 
-# -------------------- LÄS IN ALLA --------------------
+# Läs in alla filer
 dfs = []
 for file in snapshot_files:
     df = None
@@ -28,111 +22,73 @@ for file in snapshot_files:
             if len(df.columns) > 3:
                 break
         except:
-            continue
+            pass
     if df is None:
         st.error(f"Kunde inte läsa {file.name}")
         continue
-
-    # Försök hitta datum från filnamnet
     try:
         date_str = file.name.split("snapshot_")[-1].split(".")[0].replace("_", "-")[:10]
         snap_date = datetime.strptime(date_str, "%Y-%m-%d")
     except:
         snap_date = datetime.now()
-
     df["Snapshot_Date"] = snap_date
     dfs.append(df)
 
-if not dfs:
-    st.stop()
-
 data = pd.concat(dfs, ignore_index=True)
 
-# -------------------- VÄLJ KOLUMNER SJÄLV --------------------
-st.subheader("Välj vilka kolumner som innehåller vad")
+st.write("Välj kolumner själv:")
 cols = list(data.columns)
-
 col1, col2, col3 = st.columns(3)
 with col1:
-    iteration_col = st.selectbox("Iteration / Release", cols)
+    iteration_col = st.selectbox("Iteration", cols)
 with col2:
-    original_est_col = st.selectbox("Original Estimate (total tid)", cols)
+    original_col = st.selectbox("Original Estimate", cols)
 with col3:
-    remaining_est_col = st.selectbox("Remaining Estimate (tid kvar)", cols)
+    remaining_col = st.selectbox("Remaining Estimate", cols)
 
-# Filtrera iteration
-iteration_filter = st.text_input("Filtrera på del av iteration (valfritt)", "")
-if iteration_filter:
-    data = data[data[iteration_col].astype(str).str.contains(iteration_filter, case=False, na=False)]
+# Filtrera
+filter_text = st.text_input("Filtrera iteration (valfritt)")
+if filter_text:
+    data = data[data[iteration_col].astype(str).str.contains(filter_text, case=False, na=False)]
 
-# -------------------- KONVERTERA TID --------------------
-def to_minutes(val):
-    if pd.isna(val): return 0
-    s = str(val).lower()
-    if not s or "null" in s or "nan" in s: return 0
-    h = re.search(r"(\d+(?:\.\d+)?)\s*h", s)
-    m = re.search(r"(\d+)\s*m", s)
+# Konvertera till minuter
+def to_min(x):
+    if pd.isna(x): return 0
+    s = str(x).lower()
+    h = re.search(r"(\d+(?:\.\d+)?)h", s)
+    m = re.search(r"(\d+)m", s)
     total = 0
-    if h: total += float(h.group(1)) * 60
+    if h: total += float(h.group(1))*60
     if m: total += float(m.group(1))
     if total == 0:
         nums = re.findall(r"\d+", s)
-        if nums: total = float(nums[0])
+        total = float(nums[0]) if nums else 0
     return int(total)
 
-data["Original_Min"] = data[original_est_col].apply(to_minutes)
-data["Remaining_Min"] = data[remaining_est_col].apply(to_minutes)
+data["orig_min"] = data[original_col].apply(to_min)
+data["rem_min"] = data[remaining_col].apply(to_min)
 
-# -------------------- SEMESTER (valfritt) --------------------
-manual_days = st.slider("Extra semesterdagar", 0.0, 50.0, 0.0, 0.5)
-holiday_file = st.file_uploader("Semester-Excel (valfritt)", type=["xlsx", "xls"])
-extra_from_file = 0
-if holiday_file:
-    try:
-        hx = pd.read_excel(holiday_file, header=None)
-        extra_from_file = (hx.astype(str).str.lower() == "x").sum().sum()
-        st.success(f"Hittade {extra_from_file} semesterdagar i Excel")
-    except:
-        st.warning("Kunde inte läsa semester-excel")
+# Semester
+extra_days = st.slider("Extra semesterdagar", 0.0, 50.0, 0.0, 0.5)
 
-total_extra = manual_days + extra_from_file
-
-# -------------------- PROGNOS --------------------
-summary = data.groupby("Snapshot_Date").agg({
-    "Original_Min": "sum",
-    "Remaining_Min": "sum"
-}).reset_index()
-summary["Total_H"] = summary["Original_Min"] / 60
-summary["Remaining_H"] = summary["Remaining_Min"] / 60
+# Summera
+summary = data.groupby("Snapshot_Date").agg({"orig_min":"sum", "rem_min":"sum"}).reset_index()
+summary["Total_h"] = summary["orig_min"]/60
+summary["Rem_h"] = summary["rem_min"]/60
 summary = summary.sort_values("Snapshot_Date")
 
+# Graf
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Total_H"],
-                         mode="lines+markers", name="Totalt"))
-fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Remaining_H"],
-                         mode="lines+markers", name="Kvar", line=dict(color="red")))
-fig.update_layout(title="Burn-down", xaxis_title="Datum", yaxis_title="Timmar")
+fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Total_h"], mode="lines+markers", name="Totalt"))
+fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Rem_h"], mode="lines+markers", name="Kvar", line=dict(color="red")))
 st.plotly_chart(fig, use_container_width=True)
 
 # Prognos
-prognos = None
 if len(summary) >= 2:
-    x = list(range(len(summary)))
-    y = summary["Remaining_H"].values
-    slope = (y[-1] - y[0]) / (x[-1] - x[0])
-    if slope < 0:
-        days_left = int(summary["Remaining_H"].iloc[-1] / -slope) + 1
-        last_date = summary["Snapshot_Date"].iloc[-1].date()
-        prognos = last_date + timedelta(days=days_left)
-        prognos_semester = prognos + timedelta(days=int(total_extra))
+    days_needed = int(summary["Rem_h"].iloc[-1] / ((summary["Rem_h"].iloc[0] - summary["Rem_h"].iloc[-1]) / (len(summary)-1))) + 1
+    finish = summary["Snapshot_Date"].iloc[-1] + timedelta(days=days_needed)
+    finish_sem = finish + timedelta(days=int(extra_days))
+    st.success(f"Utan semester: {finish.date()}")
+    st.success(f"Med semester: {finish_sem.date()} (+{extra_days} dagar)")
 
-st.metric("Senaste snapshot", summary["Snapshot_Date"].iloc[-1].strftime("%Y-%m-%d"))
-st.metric("Totalt jobb", f"{summary['Total_H'].iloc[-1]:.0f} h")
-st.metric("Kvarvarande", f"{summary['Remaining_H'].iloc[-1]:.0f} h")
-if prognos:
-    st.success(f"Prognos färdig: {prognos.strftime('%Y-%m-%d')}")
-    st.success(f"Med semester: {(prognos + timedelta(days=int(total_extra))).strftime('%Y-%m-%d')} (+{total_extra:.1f} dagar)")
-
-st.download_button("Ladda ner data", data.to_csv(index=False).encode(), "progress.csv")
 st.balloons()
-st.success("KLAR! Nu funkar det – du valde kolumnerna själv")
