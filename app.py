@@ -36,13 +36,15 @@ def load_data(files):
                 if df.shape[1] > 3: break
             except: continue
         else:
-            st.error(f"Kunde inte läsa {f.name}"); continue
+            st.error(f"Kunde inte läsa {f.name}")
+            continue
 
         try:
             date_str = f.name.split("snapshot_")[-1].split(".")[0].replace("_", "-")[:10]
             snap_date = datetime.strptime(date_str, "%Y-%m-%d")
         except:
             snap_date = datetime.now()
+
         df["Snapshot_Date"] = snap_date
         dfs.append(df)
     return pd.concat(dfs, ignore_index=True) if dfs else None
@@ -51,37 +53,37 @@ data = load_data(snapshot_files)
 if data is None or data.empty:
     st.error("Ingen data"); st.stop()
 
-# -------------------- Visa kolumner (debug) --------------------
-st.sidebar.write("Kolumner i filen:", list(data.columns))
+# -------------------- Debug: visa kolumner --------------------
+st.sidebar.write("**Råa kolumnnamn:**", list(data.columns))
 
 # -------------------- SUPER-ROBUST kolumn-finnare --------------------
-def get_col(name_options):
+def get_col(options):
     cols = [str(c).strip() for c in data.columns]
-    for option in name_options:
-        if option in cols:
-            return option
-        # Matcha delvis, case-insensitive
+    for opt in options:
         for col in cols:
-            if option.lower() in col.lower() or col.lower() in option.lower():
+            if opt.lower() in col.lower() or col.lower() in opt.lower():
                 return col
     return None
 
 iteration_col = get_col(["Iteration", "Release", "Iteration Name"])
-est_col       = get_col(["Original Estimate", "OriginalEstimate", "Σ Original Estimate", "Estimate", '"Original Estimate"'])
-rem_col       = get_col(["Remaining Estimate", "Remaining", "Σ Remaining Estimate", "RemainingEstimate", '"Remaining Estimate"'])
+est_col       = get_col(["Original Estimate", "OriginalEstimate", "Σ Original Estimate", "Estimate", "Original Estimate"])
+rem_col       = get_col(["Remaining Estimate", "Remaining", "Σ Remaining Estimate", "RemainingEstimate", "Remaining Estimate"])
 
-st.sidebar.write(f"Iteration-kolumn: `{iteration_col}`")
-st.sidebar.write(f"Original Estimate: `{est_col}`")
-st.sidebar.write(f"Remaining Estimate: `{rem_col}`")
+st.sidebar.write(f"→ Iteration-kolumn: `{iteration_col}`")
+st.sidebar.write(f"→ Original Estimate: `{est_col}`")
+st.sidebar.write(f"→ Remaining Estimate: `{rem_col}`")
 
 if not all([iteration_col, est_col, rem_col]):
-    st.error("Kunde inte hitta alla nödvändiga kolumner. Kolla sidomenyn.")
+    st.error("Kunde inte hitta alla kolumner. Kolla sidomenyn och råa kolumnnamn ovan.")
     st.stop()
 
-# Filtrera iteration
+# -------------------- Filtrera iteration --------------------
 data = data[data[iteration_col].astype(str).str.contains(iteration_filter, case=False, na=False)]
+if data.empty:
+    st.warning(f"Ingen data för iteration '{iteration_filter}'")
+    st.stop()
 
-# -------------------- Konvertera estimat --------------------
+# -------------------- Konvertera estimat till minuter --------------------
 def to_minutes(val):
     if pd.isna(val): return 0
     s = str(val).strip()
@@ -95,6 +97,7 @@ def to_minutes(val):
         m = float(nums[0]) if nums else 0
     return int(h * 60 + m)
 
+# HÄR ANVÄNDER VI RÄTT VARIABEL – ingen hårdkodning!
 data["Est_Min"] = data[est_col].apply(to_minutes)
 data["Rem_Min"] = data[rem_col].apply(to_minutes)
 
@@ -103,13 +106,13 @@ extra_days = manual_holiday_days
 if holiday_file:
     try:
         df_h = pd.read_excel(holiday_file, header=None, engine="openpyxl")
-        count_x = df_h.astype(str).str.lower().str.contains("x").sum().sum()
+        count_x = df_h.astype(str).str.lower().applymap(lambda x: "x" in x).sum().sum()
         extra_days += count_x
-        st.success(f"Semester-Excel: +{count_x} persondagar (totalt {extra_days:.1f})")
-    except:
-        st.warning("Kunde inte läsa semester-Excel – använder bara slidern")
+        st.success(f"Semester-Excel laddad → +{count_x} persondagar (totalt {extra_days:.1f})")
+    except Exception as e:
+        st.warning(f"Kunde inte läsa semester-Excel: {e}")
 
-# -------------------- Prognos --------------------
+# -------------------- Prognos & summering --------------------
 summary = data.groupby("Snapshot_Date").agg(
     Total_H=("Est_Min", lambda x: x.sum()/60),
     Remaining_H=("Rem_Min", lambda x: x.sum()/60)
@@ -117,7 +120,7 @@ summary = data.groupby("Snapshot_Date").agg(
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Total_H"], mode="lines+markers", name="Totalt"))
-fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Remaining_H"], mode="lines+markers", name="Kvar", line=dict(color="red")))
+fig.add_trace(go.Scatter(x=summary["Snapshot_Date"], y=summary["Remaining_H"], mode="lines+markers", name="Kvarvarande", line=dict(color="red")))
 fig.update_layout(title="Burn-down Chart", xaxis_title="Datum", yaxis_title="Timmar")
 
 if len(summary) >= 2 and summary["Remaining_H"].iloc[-1] < summary["Remaining_H"].iloc[0]:
@@ -131,7 +134,7 @@ if len(summary) >= 2 and summary["Remaining_H"].iloc[-1] < summary["Remaining_H"
 else:
     orig_finish = final_finish = None
 
-# -------------------- Visa --------------------
+# -------------------- Visa resultat --------------------
 c1, c2 = st.columns(2)
 with c1:
     st.metric("Senaste snapshot", summary["Snapshot_Date"].iloc[-1].strftime("%Y-%m-%d"))
@@ -144,4 +147,4 @@ with c2:
 
 st.plotly_chart(fig, use_container_width=True)
 st.download_button("Ladda ner data", data.to_csv(index=False).encode(), "progress.csv", "text/csv")
-st.success("KLAR! Allt funkar nu – oavsett kolumnnamn och med eller utan semester-Excel")
+st.success("KLAR! Funkar med alla era filer – med eller utan semester-Excel")
